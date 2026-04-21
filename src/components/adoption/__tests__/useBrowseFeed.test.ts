@@ -76,7 +76,6 @@ describe("useBrowseFeed", () => {
 
     const skippedId = result.current.current!.id;
     act(() => result.current.handleSkip());
-    // Drain queue — skipped ID should not reappear
     const seen = new Set<string>();
     for (let i = 0; i < 5; i++) {
       if (result.current.current) seen.add(result.current.current.id);
@@ -111,5 +110,31 @@ describe("useBrowseFeed", () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.isExhausted).toBe(true);
     expect(result.current.current).toBeNull();
+  });
+
+  it("auto-fetches the next page when an entire fetched page is already skipped", async () => {
+    // Scenario: page 2 returns only animal-A which was previously skipped.
+    // The hook must detect fresh.length===0 && nextCursor and immediately fetch page 3.
+    const animalA = makeAnimal("animal-A", "2026-04-20T00:00:00Z");
+    const animalB = makeAnimal("animal-B", "2026-04-19T00:00:00Z");
+
+    // page1: [animalA] with cursor; page2: [animalA again] with cursor (all filtered); page3: [animalB]
+    fetchMock = mockFetch([
+      { data: [animalA], nextCursor: "cursor-p2" },
+      { data: [animalA], nextCursor: "cursor-p3" }, // all pre-skipped — triggers auto-fetch
+      { data: [animalB], nextCursor: null },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useBrowseFeed());
+
+    // Page 1 loads; skip animalA so it enters the skip set
+    await waitFor(() => expect(result.current.current?.id).toBe("animal-A"));
+    act(() => result.current.handleSkip()); // animal-A now in skipped set; queue < 3 → fetch page 2
+
+    // Page 2 returns only animal-A (already skipped) → hook auto-fetches page 3
+    // Page 3 returns animal-B → should become current
+    await waitFor(() => expect(result.current.current?.id).toBe("animal-B"), { timeout: 3000 });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

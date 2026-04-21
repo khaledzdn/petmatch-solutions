@@ -23,9 +23,12 @@ export function useBrowseFeed({ params = {} }: UseBrowseFeedOptions = {}): UseBr
   const [isExhausted, setIsExhausted] = useState(false);
   // skipped IDs are session-only — never fetched again in this session
   const skipped = useRef<Set<string>>(new Set());
+  // ref-based guard prevents stale-closure double-fetches
+  const isFetching = useRef(false);
 
   const fetchMore = useCallback(async (nextCursor: string | null) => {
-    if (isLoading) return;
+    if (isFetching.current) return;
+    isFetching.current = true;
     setIsLoading(true);
     try {
       const search = new URLSearchParams();
@@ -41,34 +44,43 @@ export function useBrowseFeed({ params = {} }: UseBrowseFeedOptions = {}): UseBr
       const fresh: Animal[] = (json.data ?? []).filter(
         (a: Animal) => !skipped.current.has(a.id)
       );
+      const newCursor: string | null = json.nextCursor;
+
+      if (fresh.length === 0 && newCursor) {
+        // entire page was pre-skipped — fetch the next page immediately
+        isFetching.current = false;
+        setIsLoading(false);
+        fetchMore(newCursor);
+        return;
+      }
+
       setQueue((prev) => [...prev, ...fresh]);
-      setCursor(json.nextCursor);
-      if (!json.nextCursor && fresh.length === 0) setIsExhausted(true);
+      setCursor(newCursor);
+      if (!newCursor && fresh.length === 0) setIsExhausted(true);
     } finally {
+      isFetching.current = false;
       setIsLoading(false);
     }
-  }, [isLoading, params.species, params.maxAgeMonths]);
+  }, [params.species, params.maxAgeMonths]); // removed isLoading dep — isFetching.current is the guard now
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { fetchMore(null); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const advance = useCallback(() => {
     setQueue((prev) => {
       const next = prev.slice(1);
-      // prefetch when fewer than 3 remain
-      if (next.length < 3 && cursor && !isLoading) {
+      if (next.length < 3 && cursor && !isFetching.current) {
         fetchMore(cursor);
       } else if (next.length === 0 && !cursor) {
         setIsExhausted(true);
       }
       return next;
     });
-  }, [cursor, isLoading, fetchMore]);
+  }, [cursor, fetchMore]);
 
   const handleFavourite = useCallback(() => {
     const animal = queue[0];
     if (!animal) return;
-    // fire-and-forget — optimistic UI, no error surface on this ticket
+    // fire-and-forget — optimistic UI
     fetch("/api/animals/favourites", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
